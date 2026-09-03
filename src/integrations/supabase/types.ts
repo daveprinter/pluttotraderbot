@@ -20,6 +20,7 @@ export type Database = {
           created_at: string
           expires_at: string
           id: string
+          login_email: string | null
           token: string
           verification_code: string
           verified: boolean
@@ -29,6 +30,7 @@ export type Database = {
           created_at?: string
           expires_at?: string
           id?: string
+          login_email?: string | null
           token: string
           verification_code: string
           verified?: boolean
@@ -38,6 +40,7 @@ export type Database = {
           created_at?: string
           expires_at?: string
           id?: string
+          login_email?: string | null
           token?: string
           verification_code?: string
           verified?: boolean
