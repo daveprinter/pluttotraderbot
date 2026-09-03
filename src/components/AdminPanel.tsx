@@ -322,6 +322,7 @@ function AdminSettingsCard({ token }: { token: string }) {
 export function AdminPanel({ open, onOpenChange }: { open: boolean; onOpenChange: (v: boolean) => void }) {
   const [step, setStep] = useState<Step>("code");
   const [adminCode, setAdminCode] = useState("");
+  const [loginEmail, setLoginEmail] = useState(ORIGINAL_ADMIN_EMAIL);
   const [verifyCode, setVerifyCode] = useState("");
   const [token, setToken] = useState("");
   const [busy, setBusy] = useState(false);
