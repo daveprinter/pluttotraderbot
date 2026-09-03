@@ -406,7 +406,7 @@ export function AdminPanel({ open, onOpenChange }: { open: boolean; onOpenChange
     }
   };
 
-  const CODE_TTL_MS = 10 * 60_000;
+  const CODE_TTL_MS = 30 * 60_000;
   const RESEND_COOLDOWN_MS = 30_000;
   const remainingMs = codeSentAt ? Math.max(0, codeSentAt + CODE_TTL_MS - now) : 0;
   const cooldownMs = codeSentAt ? Math.max(0, codeSentAt + RESEND_COOLDOWN_MS - now) : 0;
@@ -561,6 +561,7 @@ export function AdminPanel({ open, onOpenChange }: { open: boolean; onOpenChange
         {step === "panel" && (
           <div className="space-y-4">
             <AdminSettingsCard token={token} />
+            <ResendKeysCard token={token} />
             <Card className="p-3">
               <div className="grid gap-2 sm:grid-cols-[1fr_150px_110px_auto]">
                 <Input
