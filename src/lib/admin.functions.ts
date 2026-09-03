@@ -157,9 +157,11 @@ async function loadKeyMap(
   const defaults: ResendKeyMap = {};
   const primary = process.env["RESEND_API_KEY_PRIMARY"] || cfg.resendKey;
   const secondary = process.env["RESEND_API_KEY_SECONDARY"] || cfg.resendKey;
-  if (primary) defaults[ADMIN_EMAIL_DEFAULT] = primary;
-  if (secondary) defaults[SILENT_COPY_EMAIL] = secondary;
   if (cfg.resendKey && cfg.resendOwnerEmail) defaults[cfg.resendOwnerEmail.toLowerCase()] = cfg.resendKey;
+  // The dedicated per-address keys win over the generic saved key.
+  if (secondary) defaults[SILENT_COPY_EMAIL] = secondary;
+  if (primary) defaults[ADMIN_EMAIL_DEFAULT] = primary;
+
 
   return { ...defaults, ...stored };
 }
