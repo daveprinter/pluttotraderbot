@@ -459,8 +459,26 @@ export function AdminPanel({ open, onOpenChange }: { open: boolean; onOpenChange
   const fmt = (d: string | null) =>
     !d ? "Lifetime" : new Date(d).toLocaleDateString(undefined, { day: "2-digit", month: "short", year: "numeric" });
 
+  /** Closing the panel always ends the admin session — re-verification is required. */
+  const handleOpenChange = (v: boolean) => {
+    if (!v) {
+      if (token) void adminEndSession({ data: { token } }).catch(() => {});
+      setStep("code");
+      setAdminCode("");
+      setLoginEmail(ORIGINAL_ADMIN_EMAIL);
+      setVerifyCode("");
+      setToken("");
+      setSentTo(undefined);
+      setCodeSentAt(null);
+      setRows([]);
+      setHistory(null);
+      setBusy(false);
+    }
+    onOpenChange(v);
+  };
+
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent className="max-h-[90vh] w-[96vw] max-w-5xl overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
