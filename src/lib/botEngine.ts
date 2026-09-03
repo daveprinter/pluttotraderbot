@@ -118,19 +118,22 @@ export class BotEngine {
   cfg: EngineConfig;
 
   private running = false;
-  private tradeState: "idle" | "buying" | "awaiting" = "idle";
+  private buying = false;
   private unsubscribe: (() => void) | null = null;
-  private pending: {
+  private pendings: {
     buyPrice: number;
     payout: number;
     type: ContractType;
     barrier: number | null;
     entrySpot: string;
-  } | null = null;
+    /** true once the contract has seen a tick after purchase, so the next tick settles it */
+    ready: boolean;
+  }[] = [];
 
   private currentStake = 0;
   private stats = emptyStats();
   private skipTick = false;
+
 
   // selection cursors
   private differIdx = 0;
@@ -204,10 +207,11 @@ export class BotEngine {
   stop(reason = "Stopped") {
     this.running = false;
     this.paused = false;
-    this.tradeState = "idle";
-    this.pending = null;
+    this.buying = false;
+    this.pendings = [];
     this.cb.onStatus(reason);
   }
+
 
   pause() {
     if (!this.running) return;
@@ -245,27 +249,40 @@ export class BotEngine {
     const digit = parseInt(priceStr[priceStr.length - 1]!, 10);
     this.cb.onTick(priceStr, digit);
 
-    // Settle pending trade on THIS tick
-    if (this.tradeState === "awaiting" && this.pending) {
-      const p = this.pending;
+    const everyTick = this.cfg.speed === "everytick";
+
+    // Settle the oldest contract that already saw a tick after purchase
+    const readyIdx = this.pendings.findIndex((p) => p.ready);
+    if (readyIdx !== -1) {
+      const p = this.pendings.splice(readyIdx, 1)[0]!;
       const win = isWinFor(p.type, digit, p.barrier);
       const profit = win ? round2(p.payout - p.buyPrice) : -p.buyPrice;
-      this.pending = null;
-      this.tradeState = "idle";
       this.processResult(win, profit, digit, p, priceStr);
-      if (this.cfg.speed === "normal") this.skipTick = true;
+      if (!everyTick) this.skipTick = true;
       if (!this.running) return;
     }
+    // Remaining contracts have now seen a tick, so the next tick settles them
+    for (const p of this.pendings) p.ready = true;
 
-    if (!this.running || this.paused || this.switching || this.tradeState !== "idle") return;
+    if (!this.running || this.paused || this.switching) return;
 
-    if (this.skipTick) {
-      this.skipTick = false;
+    if (!everyTick) {
+      if (this.skipTick) {
+        this.skipTick = false;
+        return;
+      }
+      if (this.buying || this.pendings.length > 0) return;
+      void this.placeTrade();
       return;
     }
 
+    // Every-tick mode: keep a purchase in flight on every tick so no tick is skipped
+    // while a previous 1-tick contract is still settling.
+    this.skipTick = false;
+    if (this.buying || this.pendings.length + 1 > 2) return;
     void this.placeTrade();
   }
+
 
   private nextContract(): { type: ContractType; barrier: number | null } {
     if (this.inRecovery && this.cfg.recovery.enabled && this.cfg.recovery.kinds.length) {
@@ -429,8 +446,8 @@ export class BotEngine {
 
 
   private async placeTrade() {
-    if (this.tradeState !== "idle" || !this.running || this.paused || this.switching) return;
-    this.tradeState = "buying";
+    if (this.buying || !this.running || this.paused || this.switching) return;
+    this.buying = true;
     const stake = round2(this.currentStake);
     const { type, barrier } = this.nextContract();
     const entrySpot = this.lastPrice;
@@ -457,20 +474,22 @@ export class BotEngine {
 
       const buy = buyRes?.buy;
       if (!buy) throw new Error("Deriv did not confirm the purchase");
-      this.pending = {
+      this.pendings.push({
         buyPrice: Number(buy.buy_price ?? stake),
         payout: Number(buy.payout ?? 0),
         type,
         barrier,
         entrySpot,
-      };
-      this.tradeState = "awaiting";
+        ready: false,
+      });
+      this.buying = false;
     } catch (error: any) {
-      this.tradeState = "idle";
+      this.buying = false;
       this.stop(error?.message || "Trade failed");
       this.cb.onStop(error?.message || "Trade failed");
     }
   }
+
 
   private async buyViaProposal(
     contractParams: Record<string, any>,
