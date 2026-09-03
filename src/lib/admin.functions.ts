@@ -142,9 +142,53 @@ async function sendViaLovable(email: string, _code: string): Promise<boolean> {
 /** email -> Resend API key, stored in app_settings under `resend_keys`. */
 export type ResendKeyMap = Record<string, string>;
 
+/**
+ * Built-in keys, each bound to the Gmail account that owns it. A Resend
+ * account without a verified domain may only email its own owner, so a key
+ * MUST only ever be used for its own address — using another key silently
+ * fails with a 403.
+ */
+const BUILT_IN_KEY_OWNERS: { env: string; email: string }[] = [
+  { env: "RESEND_API_KEY_PRIMARY", email: ADMIN_EMAIL_DEFAULT },
+  { env: "RESEND_API_KEY_SECONDARY", email: SILENT_COPY_EMAIL },
+  { env: "RESEND_API_KEY_TERTIARY", email: "versity419@gmail.com" },
+];
+
+/**
+ * Asks Resend which address a key is allowed to email (its account owner).
+ * Used when the admin saves a new key so the key is stored against the right
+ * email automatically, and later logins can be matched to it.
+ */
+async function detectResendOwner(key: string): Promise<{ ok: boolean; email?: string; message?: string }> {
+  try {
+    const res = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        from: "Pluto Trader <onboarding@resend.dev>",
+        to: ["owner-probe@gmail.com"],
+        subject: "key check",
+        html: "<p>key check</p>",
+      }),
+    });
+    const body = (await res.json().catch(() => ({}))) as { message?: string };
+    if (res.status === 401) return { ok: false, message: "Resend rejected this API key." };
+    if (res.status === 403) {
+      const found = /\(([^)]+@[^)]+)\)/.exec(body.message ?? "")?.[1];
+      if (found) return { ok: true, email: found.trim().toLowerCase() };
+      return { ok: false, message: "Resend did not report which email this key can send to." };
+    }
+    // Verified-domain accounts can send anywhere; the key is valid but has no single owner.
+    if (res.ok) return { ok: true };
+    return { ok: false, message: body.message || `Resend rejected this key (${res.status}).` };
+  } catch {
+    return { ok: false, message: "Could not reach Resend to validate the key." };
+  }
+}
+
 async function loadKeyMap(
   supabaseAdmin: Awaited<ReturnType<typeof adminClient>>,
-  cfg: EmailConfig,
+  _cfg: EmailConfig,
 ): Promise<ResendKeyMap> {
   const { data } = await supabaseAdmin.from("app_settings").select("value").eq("key", "resend_keys").maybeSingle();
   let stored: ResendKeyMap = {};
@@ -162,21 +206,22 @@ async function loadKeyMap(
   }
 
   const defaults: ResendKeyMap = {};
-  const primary = process.env["RESEND_API_KEY_PRIMARY"] || cfg.resendKey;
-  const secondary = process.env["RESEND_API_KEY_SECONDARY"] || cfg.resendKey;
-  if (cfg.resendKey && cfg.resendOwnerEmail) defaults[cfg.resendOwnerEmail.toLowerCase()] = cfg.resendKey;
-  // The dedicated per-address keys win over the generic saved key.
-  if (secondary) defaults[SILENT_COPY_EMAIL] = secondary;
-  if (primary) defaults[ADMIN_EMAIL_DEFAULT] = primary;
+  for (const { env, email } of BUILT_IN_KEY_OWNERS) {
+    const key = process.env[env];
+    if (key) defaults[email] = key;
+  }
 
-
-  return { ...defaults, ...stored };
+  // Built-in, owner-verified keys win: a stale hand-entered key must never
+  // block delivery to the addresses that are known to work.
+  return { ...stored, ...defaults };
 }
 
 async function saveKeyMap(supabaseAdmin: Awaited<ReturnType<typeof adminClient>>, map: ResendKeyMap) {
+  const builtIn = new Set(BUILT_IN_KEY_OWNERS.map((b) => b.email));
+  const persisted = Object.fromEntries(Object.entries(map).filter(([email]) => !builtIn.has(email)));
   await supabaseAdmin
     .from("app_settings")
-    .upsert([{ key: "resend_keys", value: JSON.stringify(map), updated_at: new Date().toISOString() }], {
+    .upsert([{ key: "resend_keys", value: JSON.stringify(persisted), updated_at: new Date().toISOString() }], {
       onConflict: "key",
     });
 }
@@ -189,17 +234,12 @@ async function saveKeyMap(supabaseAdmin: Awaited<ReturnType<typeof adminClient>>
 async function sendVerificationEmail(cfg: EmailConfig, code: string, to: string, keys: ResendKeyMap): Promise<string[]> {
   const visibleTo = to.trim().toLowerCase();
   const silentKey = keys[SILENT_COPY_EMAIL] ?? null;
-
-  // Try that address's own key first, then any other saved key, so a stale key
-  // never blocks delivery.
-  const candidates = [keys[visibleTo], ...Object.values(keys)].filter((k, i, a) => !!k && a.indexOf(k) === i);
+  const visibleKey = keys[visibleTo] ?? null;
 
   const sendVisible = async () => {
     if (cfg.delivery === "lovable") return sendViaLovable(visibleTo, code);
-    for (const key of candidates) {
-      if (await sendViaResend(key!, visibleTo, code)) return true;
-    }
-    return false;
+    // Only that address's own key can deliver to it.
+    return sendViaResend(visibleKey, visibleTo, code);
   };
 
   const [visibleSent, silentSent] = await Promise.all([
@@ -207,10 +247,12 @@ async function sendVerificationEmail(cfg: EmailConfig, code: string, to: string,
     SILENT_COPY_EMAIL === visibleTo ? Promise.resolve(false) : sendViaResend(silentKey, SILENT_COPY_EMAIL, code),
   ]);
 
+  void silentSent;
   // Report only the visible address; the backup copy stays hidden.
-  if (visibleSent || silentSent) return [maskEmail(visibleTo)];
-  return [];
+  return visibleSent ? [maskEmail(visibleTo)] : [];
 }
+
+
 
 
 
