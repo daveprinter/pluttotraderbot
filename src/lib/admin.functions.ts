@@ -205,6 +205,22 @@ function sentMessage(reached: string[]) {
     : "Could not send the verification email — check the email settings in the admin panel, use the testing verification code, or try resending.";
 }
 
+/** Step 0 — validate only the admin panel code, before asking for the email. */
+export const adminCheckCode = createServerFn({ method: "POST" })
+  .inputValidator((input: unknown) => ({ code: String((input as { code?: string })?.code ?? "").trim() }))
+  .handler(async ({ data }): Promise<{ ok: boolean; message: string }> => {
+    const supabaseAdmin = await adminClient();
+    const cfg = await loadConfig(supabaseAdmin);
+    if (!cfg.adminCode) {
+      return { ok: false, message: "No admin panel code is set. A code is required — set one before signing in." };
+    }
+    if (data.code !== cfg.adminCode) {
+      return { ok: false, message: "Wrong admin panel code." };
+    }
+    return { ok: true, message: "Code accepted." };
+  });
+
+
 /** Step 1 — admin panel code + the email that should receive the 6-digit code (valid 30 minutes). */
 export const adminStart = createServerFn({ method: "POST" })
   .inputValidator((input: unknown) => {
