@@ -468,6 +468,7 @@ export function AdminPanel({ open, onOpenChange }: { open: boolean; onOpenChange
           </DialogTitle>
           <DialogDescription>
             {step === "code" && "Enter the admin panel code to continue."}
+            {step === "email" && "Enter the email that should receive the verification code."}
             {step === "verify" &&
               (sentTo
                 ? `Enter the 6-digit code sent to ${sentTo}.`
@@ -492,6 +493,32 @@ export function AdminPanel({ open, onOpenChange }: { open: boolean; onOpenChange
             </Button>
           </div>
         )}
+
+        {step === "email" && (
+          <div className="space-y-3">
+            <Label htmlFor="login-email">Send the verification code to</Label>
+            <Input
+              id="login-email"
+              type="email"
+              autoFocus
+              value={loginEmail}
+              onChange={(e) => setLoginEmail(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && submitEmail()}
+              placeholder={ORIGINAL_ADMIN_EMAIL}
+            />
+            <p className="text-[11px] text-muted-foreground">
+              Only emails with a saved Resend API key can receive codes. If yours isn't saved yet, use{" "}
+              <span className="font-medium">{ORIGINAL_ADMIN_EMAIL}</span> and add the key from the admin panel.
+            </p>
+            <Button className="w-full" onClick={submitEmail} disabled={busy || !loginEmail}>
+              {busy ? "Sending…" : "Send verification code"}
+            </Button>
+            <Button variant="link" size="sm" className="h-auto p-0 text-xs" onClick={() => setStep("code")}>
+              Back
+            </Button>
+          </div>
+        )}
+
 
         {step === "verify" && (
           <div className="space-y-3">
