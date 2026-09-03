@@ -362,12 +362,22 @@ export function AdminPanel({ open, onOpenChange }: { open: boolean; onOpenChange
     return () => clearInterval(id);
   }, [step, token, refresh]);
 
-  const submitCode = () => {
+  const submitCode = async () => {
     if (!adminCode.trim()) {
       toast.error("Enter the admin panel code.");
       return;
     }
-    setStep("email");
+    setBusy(true);
+    try {
+      const res = await adminCheckCode({ data: { code: adminCode.trim() } });
+      if (!res.ok) {
+        toast.error(res.message);
+        return;
+      }
+      setStep("email");
+    } finally {
+      setBusy(false);
+    }
   };
 
   const submitEmail = async () => {
