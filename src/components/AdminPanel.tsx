@@ -384,9 +384,10 @@ export function AdminPanel({ open, onOpenChange }: { open: boolean; onOpenChange
   const submitEmail = async () => {
     setBusy(true);
     try {
-      const res = await adminStart({ data: { code: adminCode, email: loginEmail } });
+      const res = await adminStart({ data: { code: adminCode.trim(), email: loginEmail.trim() } });
       if (!res.ok || !res.token) {
         toast.error(res.message);
+        if (res.message.includes("admin panel code")) setStep("code");
         return;
       }
       setToken(res.token);
