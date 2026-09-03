@@ -792,7 +792,7 @@ export const adminListResendKeys = createServerFn({ method: "POST" })
       .map(([email, key]) => ({
         email,
         keyPreview: maskKey(key) ?? "",
-        builtIn: email === ADMIN_EMAIL_DEFAULT || email === SILENT_COPY_EMAIL,
+        builtIn: BUILT_IN_KEY_OWNERS.some((b) => b.email === email),
       }))
       .sort((a, b) => a.email.localeCompare(b.email));
   });
