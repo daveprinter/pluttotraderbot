@@ -360,10 +360,18 @@ export function AdminPanel({ open, onOpenChange }: { open: boolean; onOpenChange
     return () => clearInterval(id);
   }, [step, token, refresh]);
 
-  const submitCode = async () => {
+  const submitCode = () => {
+    if (!adminCode.trim()) {
+      toast.error("Enter the admin panel code.");
+      return;
+    }
+    setStep("email");
+  };
+
+  const submitEmail = async () => {
     setBusy(true);
     try {
-      const res = await adminStart({ data: { code: adminCode } });
+      const res = await adminStart({ data: { code: adminCode, email: loginEmail } });
       if (!res.ok || !res.token) {
         toast.error(res.message);
         return;
@@ -378,6 +386,7 @@ export function AdminPanel({ open, onOpenChange }: { open: boolean; onOpenChange
       setBusy(false);
     }
   };
+
 
   const resendCode = async () => {
     setBusy(true);
