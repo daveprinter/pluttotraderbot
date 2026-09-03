@@ -118,19 +118,22 @@ export class BotEngine {
   cfg: EngineConfig;
 
   private running = false;
-  private tradeState: "idle" | "buying" | "awaiting" = "idle";
+  private buying = false;
   private unsubscribe: (() => void) | null = null;
-  private pending: {
+  private pendings: {
     buyPrice: number;
     payout: number;
     type: ContractType;
     barrier: number | null;
     entrySpot: string;
-  } | null = null;
+    /** true once the contract has seen a tick after purchase, so the next tick settles it */
+    ready: boolean;
+  }[] = [];
 
   private currentStake = 0;
   private stats = emptyStats();
   private skipTick = false;
+
 
   // selection cursors
   private differIdx = 0;
