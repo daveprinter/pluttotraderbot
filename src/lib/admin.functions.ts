@@ -82,7 +82,9 @@ async function loadConfig(supabaseAdmin: Awaited<ReturnType<typeof adminClient>>
     adminCode: map["admin_code"] === undefined ? ADMIN_CODE_DEFAULT : map["admin_code"],
     // Blank means the testing shortcut is disabled — only the emailed code works.
     fallbackCode: map["fallback_verification_code"] || null,
-    resendKey: map["resend_api_key"] || process.env["RESEND_API_KEY"] || null,
+    // The project secret wins so a newly supplied key takes effect immediately.
+    resendKey: process.env["RESEND_API_KEY"] || map["resend_api_key"] || null,
+
     resendOwnerEmail: map["resend_owner_email"] || ADMIN_EMAIL_DEFAULT,
     delivery,
   };
