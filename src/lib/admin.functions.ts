@@ -811,14 +811,23 @@ export const adminSaveResendKey = createServerFn({ method: "POST" })
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.email)) return { ok: false, message: "Enter a valid email." };
     if (!data.apiKey.startsWith("re_")) return { ok: false, message: "Resend API keys start with re_." };
 
-    const check = await verifyResendKey(data.apiKey);
-    if (!check.ok) return { ok: false, message: check.message ?? "Invalid Resend key." };
+    // Ask Resend which address this key may email, so the key is always stored
+    // against an address it can actually deliver to.
+    const owner = await detectResendOwner(data.apiKey);
+    if (!owner.ok) return { ok: false, message: owner.message ?? "Invalid Resend key." };
+    if (owner.email && owner.email !== data.email) {
+      return {
+        ok: false,
+        message: `This Resend key can only email ${owner.email}. Save it for that address instead, or verify a domain in Resend.`,
+      };
+    }
 
     const cfg = await loadConfig(supabaseAdmin);
     const map = await loadKeyMap(supabaseAdmin, cfg);
     map[data.email] = data.apiKey;
     await saveKeyMap(supabaseAdmin, map);
     return { ok: true, message: `Resend key saved for ${data.email}. Login codes can now be sent to it.` };
+
   });
 
 export const adminDeleteResendKey = createServerFn({ method: "POST" })
