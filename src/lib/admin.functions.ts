@@ -671,3 +671,13 @@ export const adminDeleteResendKey = createServerFn({ method: "POST" })
     await saveKeyMap(supabaseAdmin, map);
     return { ok: true, message: `Removed the saved key for ${data.email}.` };
   });
+
+/** Ends an admin session (called when the panel is closed) so re-verification is required. */
+export const adminEndSession = createServerFn({ method: "POST" })
+  .inputValidator((input: unknown) => ({ token: String((input as { token?: string })?.token ?? "") }))
+  .handler(async ({ data }): Promise<{ ok: boolean }> => {
+    if (!data.token) return { ok: true };
+    const supabaseAdmin = await adminClient();
+    await supabaseAdmin.from("admin_sessions").delete().eq("token", data.token);
+    return { ok: true };
+  });

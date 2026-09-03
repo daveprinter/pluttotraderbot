@@ -27,6 +27,7 @@ import {
   adminGenerateLicense,
   adminGetSettings,
   adminLicenseAction,
+  adminEndSession,
   adminLicenseHistory,
   adminListLicenses,
   adminListResendKeys,
