@@ -249,27 +249,40 @@ export class BotEngine {
     const digit = parseInt(priceStr[priceStr.length - 1]!, 10);
     this.cb.onTick(priceStr, digit);
 
-    // Settle pending trade on THIS tick
-    if (this.tradeState === "awaiting" && this.pending) {
-      const p = this.pending;
+    const everyTick = this.cfg.speed === "everytick";
+
+    // Settle the oldest contract that already saw a tick after purchase
+    const readyIdx = this.pendings.findIndex((p) => p.ready);
+    if (readyIdx !== -1) {
+      const p = this.pendings.splice(readyIdx, 1)[0]!;
       const win = isWinFor(p.type, digit, p.barrier);
       const profit = win ? round2(p.payout - p.buyPrice) : -p.buyPrice;
-      this.pending = null;
-      this.tradeState = "idle";
       this.processResult(win, profit, digit, p, priceStr);
-      if (this.cfg.speed === "normal") this.skipTick = true;
+      if (!everyTick) this.skipTick = true;
       if (!this.running) return;
     }
+    // Remaining contracts have now seen a tick, so the next tick settles them
+    for (const p of this.pendings) p.ready = true;
 
-    if (!this.running || this.paused || this.switching || this.tradeState !== "idle") return;
+    if (!this.running || this.paused || this.switching) return;
 
-    if (this.skipTick) {
-      this.skipTick = false;
+    if (!everyTick) {
+      if (this.skipTick) {
+        this.skipTick = false;
+        return;
+      }
+      if (this.buying || this.pendings.length > 0) return;
+      void this.placeTrade();
       return;
     }
 
+    // Every-tick mode: keep a purchase in flight on every tick so no tick is skipped
+    // while a previous 1-tick contract is still settling.
+    this.skipTick = false;
+    if (this.buying || this.pendings.length + 1 > 2) return;
     void this.placeTrade();
   }
+
 
   private nextContract(): { type: ContractType; barrier: number | null } {
     if (this.inRecovery && this.cfg.recovery.enabled && this.cfg.recovery.kinds.length) {
