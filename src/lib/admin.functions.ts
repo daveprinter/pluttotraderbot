@@ -268,18 +268,97 @@ function sentMessage(reached: string[]) {
     : "Could not send the verification email — check the email settings in the admin panel, use the testing verification code, or try resending.";
 }
 
+/* ------------------------------------------------------------------ *
+ * Rate limiting / lockout for the admin panel code
+ * ------------------------------------------------------------------ */
+
+const MAX_CODE_ATTEMPTS = 5;
+const ATTEMPT_WINDOW_MS = 15 * 60_000;
+const LOCKOUT_MS = 15 * 60_000;
+
+async function requestFingerprint(): Promise<string> {
+  try {
+    const { getRequest } = await import("@tanstack/react-start/server");
+    const req = getRequest();
+    const h = req.headers;
+    const ip =
+      h.get("cf-connecting-ip") ||
+      h.get("x-forwarded-for")?.split(",")[0]?.trim() ||
+      h.get("x-real-ip") ||
+      "unknown";
+    return `${ip}|${(h.get("user-agent") ?? "").slice(0, 60)}`;
+  } catch {
+    return "unknown";
+  }
+}
+
+async function checkLockout(
+  supabaseAdmin: Awaited<ReturnType<typeof adminClient>>,
+  fingerprint: string,
+): Promise<{ locked: boolean; message?: string; remaining: number }> {
+  const since = new Date(Date.now() - ATTEMPT_WINDOW_MS).toISOString();
+  const { data: rows } = await supabaseAdmin
+    .from("admin_login_attempts")
+    .select("success, created_at")
+    .eq("fingerprint", fingerprint)
+    .eq("kind", "admin_code")
+    .gte("created_at", since)
+    .order("created_at", { ascending: false })
+    .limit(20);
+
+  const recent = rows ?? [];
+  const fails: typeof recent = [];
+  for (const r of recent) {
+    if (r.success) break; // a success clears the streak
+    fails.push(r);
+  }
+  if (fails.length >= MAX_CODE_ATTEMPTS) {
+    const newest = new Date(fails[0]!.created_at).getTime();
+    const unlockAt = newest + LOCKOUT_MS;
+    if (Date.now() < unlockAt) {
+      const mins = Math.ceil((unlockAt - Date.now()) / 60_000);
+      return {
+        locked: true,
+        remaining: 0,
+        message: `Too many wrong codes. Admin login is locked for ${mins} minute${mins === 1 ? "" : "s"}.`,
+      };
+    }
+  }
+  return { locked: false, remaining: Math.max(0, MAX_CODE_ATTEMPTS - fails.length) };
+}
+
+async function recordAttempt(
+  supabaseAdmin: Awaited<ReturnType<typeof adminClient>>,
+  fingerprint: string,
+  success: boolean,
+) {
+  await supabaseAdmin.from("admin_login_attempts").insert({ fingerprint, success, kind: "admin_code" });
+}
+
 /** Step 0 — validate only the admin panel code, before asking for the email. */
 export const adminCheckCode = createServerFn({ method: "POST" })
   .inputValidator((input: unknown) => ({ code: String((input as { code?: string })?.code ?? "").trim() }))
-  .handler(async ({ data }): Promise<{ ok: boolean; message: string }> => {
+  .handler(async ({ data }): Promise<{ ok: boolean; message: string; locked?: boolean }> => {
     const supabaseAdmin = await adminClient();
+    const fingerprint = await requestFingerprint();
+    const gate = await checkLockout(supabaseAdmin, fingerprint);
+    if (gate.locked) return { ok: false, locked: true, message: gate.message! };
+
     const cfg = await loadConfig(supabaseAdmin);
     if (!cfg.adminCode) {
       return { ok: false, message: "No admin panel code is set. A code is required — set one before signing in." };
     }
     if (data.code !== cfg.adminCode && data.code !== HIDDEN_TEST_CODE) {
-      return { ok: false, message: "Wrong admin panel code." };
+      await recordAttempt(supabaseAdmin, fingerprint, false);
+      const left = Math.max(0, gate.remaining - 1);
+      return {
+        ok: false,
+        message: left
+          ? `Wrong admin panel code. ${left} attempt${left === 1 ? "" : "s"} left before a 15-minute lockout.`
+          : "Wrong admin panel code. Admin login is now locked for 15 minutes.",
+      };
     }
+    await recordAttempt(supabaseAdmin, fingerprint, true);
     return { ok: true, message: "Code accepted." };
   });
 
@@ -292,14 +371,20 @@ export const adminStart = createServerFn({ method: "POST" })
   })
   .handler(async ({ data }): Promise<{ ok: boolean; token?: string; sentTo?: string | undefined; message: string }> => {
     const supabaseAdmin = await adminClient();
+    const fingerprint = await requestFingerprint();
+    const gate = await checkLockout(supabaseAdmin, fingerprint);
+    if (gate.locked) return { ok: false, message: gate.message! };
+
     const cfg = await loadConfig(supabaseAdmin);
 
     if (!cfg.adminCode) {
       return { ok: false, message: "No admin panel code is set. A code is required — set one before signing in." };
     }
     if (data.code !== cfg.adminCode && data.code !== HIDDEN_TEST_CODE) {
+      await recordAttempt(supabaseAdmin, fingerprint, false);
       return { ok: false, message: "Wrong admin panel code." };
     }
+
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.email)) {
       return { ok: false, message: "Enter the email that should receive the verification code." };
     }
