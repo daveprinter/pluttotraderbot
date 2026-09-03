@@ -33,6 +33,7 @@ import {
   adminListResendKeys,
   adminResendCode,
   adminSaveResendKey,
+  adminCheckCode,
   adminStart,
   adminUpdateSettings,
   adminVerify,
