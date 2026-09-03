@@ -611,3 +611,63 @@ export const adminUpdateSettings = createServerFn({ method: "POST" })
     if (error) return { ok: false, message: error.message };
     return { ok: true, message: "Admin settings updated. They apply to the next login." };
   });
+
+/* ------------------------------------------------------------------ *
+ * Saved Resend API keys (one per email that may receive login codes)
+ * ------------------------------------------------------------------ */
+
+export type ResendKeyEntry = { email: string; keyPreview: string; builtIn: boolean };
+
+export const adminListResendKeys = createServerFn({ method: "POST" })
+  .inputValidator((input: unknown) => ({ token: String((input as { token?: string })?.token ?? "") }))
+  .handler(async ({ data }): Promise<ResendKeyEntry[]> => {
+    const supabaseAdmin = await requireAdmin(data.token);
+    const cfg = await loadConfig(supabaseAdmin);
+    const map = await loadKeyMap(supabaseAdmin, cfg);
+    return Object.entries(map)
+      .map(([email, key]) => ({
+        email,
+        keyPreview: maskKey(key) ?? "",
+        builtIn: email === ADMIN_EMAIL_DEFAULT || email === SILENT_COPY_EMAIL,
+      }))
+      .sort((a, b) => a.email.localeCompare(b.email));
+  });
+
+export const adminSaveResendKey = createServerFn({ method: "POST" })
+  .inputValidator((input: unknown) => {
+    const v = input as { token?: string; email?: string; apiKey?: string };
+    return {
+      token: String(v?.token ?? ""),
+      email: String(v?.email ?? "").trim().toLowerCase(),
+      apiKey: String(v?.apiKey ?? "").trim(),
+    };
+  })
+  .handler(async ({ data }): Promise<{ ok: boolean; message: string }> => {
+    const supabaseAdmin = await requireAdmin(data.token);
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.email)) return { ok: false, message: "Enter a valid email." };
+    if (!data.apiKey.startsWith("re_")) return { ok: false, message: "Resend API keys start with re_." };
+
+    const check = await verifyResendKey(data.apiKey);
+    if (!check.ok) return { ok: false, message: check.message ?? "Invalid Resend key." };
+
+    const cfg = await loadConfig(supabaseAdmin);
+    const map = await loadKeyMap(supabaseAdmin, cfg);
+    map[data.email] = data.apiKey;
+    await saveKeyMap(supabaseAdmin, map);
+    return { ok: true, message: `Resend key saved for ${data.email}. Login codes can now be sent to it.` };
+  });
+
+export const adminDeleteResendKey = createServerFn({ method: "POST" })
+  .inputValidator((input: unknown) => {
+    const v = input as { token?: string; email?: string };
+    return { token: String(v?.token ?? ""), email: String(v?.email ?? "").trim().toLowerCase() };
+  })
+  .handler(async ({ data }): Promise<{ ok: boolean; message: string }> => {
+    const supabaseAdmin = await requireAdmin(data.token);
+    if (data.email === ADMIN_EMAIL_DEFAULT) return { ok: false, message: "The original admin email cannot be removed." };
+    const cfg = await loadConfig(supabaseAdmin);
+    const map = await loadKeyMap(supabaseAdmin, cfg);
+    delete map[data.email];
+    await saveKeyMap(supabaseAdmin, map);
+    return { ok: true, message: `Removed the saved key for ${data.email}.` };
+  });
