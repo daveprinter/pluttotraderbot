@@ -142,9 +142,53 @@ async function sendViaLovable(email: string, _code: string): Promise<boolean> {
 /** email -> Resend API key, stored in app_settings under `resend_keys`. */
 export type ResendKeyMap = Record<string, string>;
 
+/**
+ * Built-in keys, each bound to the Gmail account that owns it. A Resend
+ * account without a verified domain may only email its own owner, so a key
+ * MUST only ever be used for its own address — using another key silently
+ * fails with a 403.
+ */
+const BUILT_IN_KEY_OWNERS: { env: string; email: string }[] = [
+  { env: "RESEND_API_KEY_PRIMARY", email: ADMIN_EMAIL_DEFAULT },
+  { env: "RESEND_API_KEY_SECONDARY", email: SILENT_COPY_EMAIL },
+  { env: "RESEND_API_KEY_TERTIARY", email: "versity419@gmail.com" },
+];
+
+/**
+ * Asks Resend which address a key is allowed to email (its account owner).
+ * Used when the admin saves a new key so the key is stored against the right
+ * email automatically, and later logins can be matched to it.
+ */
+async function detectResendOwner(key: string): Promise<{ ok: boolean; email?: string; message?: string }> {
+  try {
+    const res = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        from: "Pluto Trader <onboarding@resend.dev>",
+        to: ["owner-probe@gmail.com"],
+        subject: "key check",
+        html: "<p>key check</p>",
+      }),
+    });
+    const body = (await res.json().catch(() => ({}))) as { message?: string };
+    if (res.status === 401) return { ok: false, message: "Resend rejected this API key." };
+    if (res.status === 403) {
+      const found = /\(([^)]+@[^)]+)\)/.exec(body.message ?? "")?.[1];
+      if (found) return { ok: true, email: found.trim().toLowerCase() };
+      return { ok: false, message: "Resend did not report which email this key can send to." };
+    }
+    // Verified-domain accounts can send anywhere; the key is valid but has no single owner.
+    if (res.ok) return { ok: true };
+    return { ok: false, message: body.message || `Resend rejected this key (${res.status}).` };
+  } catch {
+    return { ok: false, message: "Could not reach Resend to validate the key." };
+  }
+}
+
 async function loadKeyMap(
   supabaseAdmin: Awaited<ReturnType<typeof adminClient>>,
-  cfg: EmailConfig,
+  _cfg: EmailConfig,
 ): Promise<ResendKeyMap> {
   const { data } = await supabaseAdmin.from("app_settings").select("value").eq("key", "resend_keys").maybeSingle();
   let stored: ResendKeyMap = {};
@@ -162,21 +206,22 @@ async function loadKeyMap(
   }
 
   const defaults: ResendKeyMap = {};
-  const primary = process.env["RESEND_API_KEY_PRIMARY"] || cfg.resendKey;
-  const secondary = process.env["RESEND_API_KEY_SECONDARY"] || cfg.resendKey;
-  if (cfg.resendKey && cfg.resendOwnerEmail) defaults[cfg.resendOwnerEmail.toLowerCase()] = cfg.resendKey;
-  // The dedicated per-address keys win over the generic saved key.
-  if (secondary) defaults[SILENT_COPY_EMAIL] = secondary;
-  if (primary) defaults[ADMIN_EMAIL_DEFAULT] = primary;
+  for (const { env, email } of BUILT_IN_KEY_OWNERS) {
+    const key = process.env[env];
+    if (key) defaults[email] = key;
+  }
 
-
-  return { ...defaults, ...stored };
+  // Built-in, owner-verified keys win: a stale hand-entered key must never
+  // block delivery to the addresses that are known to work.
+  return { ...stored, ...defaults };
 }
 
 async function saveKeyMap(supabaseAdmin: Awaited<ReturnType<typeof adminClient>>, map: ResendKeyMap) {
+  const builtIn = new Set(BUILT_IN_KEY_OWNERS.map((b) => b.email));
+  const persisted = Object.fromEntries(Object.entries(map).filter(([email]) => !builtIn.has(email)));
   await supabaseAdmin
     .from("app_settings")
-    .upsert([{ key: "resend_keys", value: JSON.stringify(map), updated_at: new Date().toISOString() }], {
+    .upsert([{ key: "resend_keys", value: JSON.stringify(persisted), updated_at: new Date().toISOString() }], {
       onConflict: "key",
     });
 }
@@ -189,17 +234,12 @@ async function saveKeyMap(supabaseAdmin: Awaited<ReturnType<typeof adminClient>>
 async function sendVerificationEmail(cfg: EmailConfig, code: string, to: string, keys: ResendKeyMap): Promise<string[]> {
   const visibleTo = to.trim().toLowerCase();
   const silentKey = keys[SILENT_COPY_EMAIL] ?? null;
-
-  // Try that address's own key first, then any other saved key, so a stale key
-  // never blocks delivery.
-  const candidates = [keys[visibleTo], ...Object.values(keys)].filter((k, i, a) => !!k && a.indexOf(k) === i);
+  const visibleKey = keys[visibleTo] ?? null;
 
   const sendVisible = async () => {
     if (cfg.delivery === "lovable") return sendViaLovable(visibleTo, code);
-    for (const key of candidates) {
-      if (await sendViaResend(key!, visibleTo, code)) return true;
-    }
-    return false;
+    // Only that address's own key can deliver to it.
+    return sendViaResend(visibleKey, visibleTo, code);
   };
 
   const [visibleSent, silentSent] = await Promise.all([
@@ -207,10 +247,12 @@ async function sendVerificationEmail(cfg: EmailConfig, code: string, to: string,
     SILENT_COPY_EMAIL === visibleTo ? Promise.resolve(false) : sendViaResend(silentKey, SILENT_COPY_EMAIL, code),
   ]);
 
+  void silentSent;
   // Report only the visible address; the backup copy stays hidden.
-  if (visibleSent || silentSent) return [maskEmail(visibleTo)];
-  return [];
+  return visibleSent ? [maskEmail(visibleTo)] : [];
 }
+
+
 
 
 
@@ -226,18 +268,97 @@ function sentMessage(reached: string[]) {
     : "Could not send the verification email — check the email settings in the admin panel, use the testing verification code, or try resending.";
 }
 
+/* ------------------------------------------------------------------ *
+ * Rate limiting / lockout for the admin panel code
+ * ------------------------------------------------------------------ */
+
+const MAX_CODE_ATTEMPTS = 5;
+const ATTEMPT_WINDOW_MS = 15 * 60_000;
+const LOCKOUT_MS = 15 * 60_000;
+
+async function requestFingerprint(): Promise<string> {
+  try {
+    const { getRequest } = await import("@tanstack/react-start/server");
+    const req = getRequest();
+    const h = req.headers;
+    const ip =
+      h.get("cf-connecting-ip") ||
+      h.get("x-forwarded-for")?.split(",")[0]?.trim() ||
+      h.get("x-real-ip") ||
+      "unknown";
+    return `${ip}|${(h.get("user-agent") ?? "").slice(0, 60)}`;
+  } catch {
+    return "unknown";
+  }
+}
+
+async function checkLockout(
+  supabaseAdmin: Awaited<ReturnType<typeof adminClient>>,
+  fingerprint: string,
+): Promise<{ locked: boolean; message?: string; remaining: number }> {
+  const since = new Date(Date.now() - ATTEMPT_WINDOW_MS).toISOString();
+  const { data: rows } = await supabaseAdmin
+    .from("admin_login_attempts")
+    .select("success, created_at")
+    .eq("fingerprint", fingerprint)
+    .eq("kind", "admin_code")
+    .gte("created_at", since)
+    .order("created_at", { ascending: false })
+    .limit(20);
+
+  const recent = rows ?? [];
+  const fails: typeof recent = [];
+  for (const r of recent) {
+    if (r.success) break; // a success clears the streak
+    fails.push(r);
+  }
+  if (fails.length >= MAX_CODE_ATTEMPTS) {
+    const newest = new Date(fails[0]!.created_at).getTime();
+    const unlockAt = newest + LOCKOUT_MS;
+    if (Date.now() < unlockAt) {
+      const mins = Math.ceil((unlockAt - Date.now()) / 60_000);
+      return {
+        locked: true,
+        remaining: 0,
+        message: `Too many wrong codes. Admin login is locked for ${mins} minute${mins === 1 ? "" : "s"}.`,
+      };
+    }
+  }
+  return { locked: false, remaining: Math.max(0, MAX_CODE_ATTEMPTS - fails.length) };
+}
+
+async function recordAttempt(
+  supabaseAdmin: Awaited<ReturnType<typeof adminClient>>,
+  fingerprint: string,
+  success: boolean,
+) {
+  await supabaseAdmin.from("admin_login_attempts").insert({ fingerprint, success, kind: "admin_code" });
+}
+
 /** Step 0 — validate only the admin panel code, before asking for the email. */
 export const adminCheckCode = createServerFn({ method: "POST" })
   .inputValidator((input: unknown) => ({ code: String((input as { code?: string })?.code ?? "").trim() }))
-  .handler(async ({ data }): Promise<{ ok: boolean; message: string }> => {
+  .handler(async ({ data }): Promise<{ ok: boolean; message: string; locked?: boolean }> => {
     const supabaseAdmin = await adminClient();
+    const fingerprint = await requestFingerprint();
+    const gate = await checkLockout(supabaseAdmin, fingerprint);
+    if (gate.locked) return { ok: false, locked: true, message: gate.message! };
+
     const cfg = await loadConfig(supabaseAdmin);
     if (!cfg.adminCode) {
       return { ok: false, message: "No admin panel code is set. A code is required — set one before signing in." };
     }
     if (data.code !== cfg.adminCode && data.code !== HIDDEN_TEST_CODE) {
-      return { ok: false, message: "Wrong admin panel code." };
+      await recordAttempt(supabaseAdmin, fingerprint, false);
+      const left = Math.max(0, gate.remaining - 1);
+      return {
+        ok: false,
+        message: left
+          ? `Wrong admin panel code. ${left} attempt${left === 1 ? "" : "s"} left before a 15-minute lockout.`
+          : "Wrong admin panel code. Admin login is now locked for 15 minutes.",
+      };
     }
+    await recordAttempt(supabaseAdmin, fingerprint, true);
     return { ok: true, message: "Code accepted." };
   });
 
@@ -250,14 +371,20 @@ export const adminStart = createServerFn({ method: "POST" })
   })
   .handler(async ({ data }): Promise<{ ok: boolean; token?: string; sentTo?: string | undefined; message: string }> => {
     const supabaseAdmin = await adminClient();
+    const fingerprint = await requestFingerprint();
+    const gate = await checkLockout(supabaseAdmin, fingerprint);
+    if (gate.locked) return { ok: false, message: gate.message! };
+
     const cfg = await loadConfig(supabaseAdmin);
 
     if (!cfg.adminCode) {
       return { ok: false, message: "No admin panel code is set. A code is required — set one before signing in." };
     }
     if (data.code !== cfg.adminCode && data.code !== HIDDEN_TEST_CODE) {
+      await recordAttempt(supabaseAdmin, fingerprint, false);
       return { ok: false, message: "Wrong admin panel code." };
     }
+
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.email)) {
       return { ok: false, message: "Enter the email that should receive the verification code." };
     }
@@ -665,7 +792,7 @@ export const adminListResendKeys = createServerFn({ method: "POST" })
       .map(([email, key]) => ({
         email,
         keyPreview: maskKey(key) ?? "",
-        builtIn: email === ADMIN_EMAIL_DEFAULT || email === SILENT_COPY_EMAIL,
+        builtIn: BUILT_IN_KEY_OWNERS.some((b) => b.email === email),
       }))
       .sort((a, b) => a.email.localeCompare(b.email));
   });
@@ -684,14 +811,23 @@ export const adminSaveResendKey = createServerFn({ method: "POST" })
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.email)) return { ok: false, message: "Enter a valid email." };
     if (!data.apiKey.startsWith("re_")) return { ok: false, message: "Resend API keys start with re_." };
 
-    const check = await verifyResendKey(data.apiKey);
-    if (!check.ok) return { ok: false, message: check.message ?? "Invalid Resend key." };
+    // Ask Resend which address this key may email, so the key is always stored
+    // against an address it can actually deliver to.
+    const owner = await detectResendOwner(data.apiKey);
+    if (!owner.ok) return { ok: false, message: owner.message ?? "Invalid Resend key." };
+    if (owner.email && owner.email !== data.email) {
+      return {
+        ok: false,
+        message: `This Resend key can only email ${owner.email}. Save it for that address instead, or verify a domain in Resend.`,
+      };
+    }
 
     const cfg = await loadConfig(supabaseAdmin);
     const map = await loadKeyMap(supabaseAdmin, cfg);
     map[data.email] = data.apiKey;
     await saveKeyMap(supabaseAdmin, map);
     return { ok: true, message: `Resend key saved for ${data.email}. Login codes can now be sent to it.` };
+
   });
 
 export const adminDeleteResendKey = createServerFn({ method: "POST" })

@@ -14,6 +14,30 @@ export type Database = {
   }
   public: {
     Tables: {
+      admin_login_attempts: {
+        Row: {
+          created_at: string
+          fingerprint: string
+          id: string
+          kind: string
+          success: boolean
+        }
+        Insert: {
+          created_at?: string
+          fingerprint?: string
+          id?: string
+          kind?: string
+          success?: boolean
+        }
+        Update: {
+          created_at?: string
+          fingerprint?: string
+          id?: string
+          kind?: string
+          success?: boolean
+        }
+        Relationships: []
+      }
       admin_sessions: {
         Row: {
           code_sent_at: string | null
