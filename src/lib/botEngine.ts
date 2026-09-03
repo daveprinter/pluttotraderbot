@@ -207,10 +207,11 @@ export class BotEngine {
   stop(reason = "Stopped") {
     this.running = false;
     this.paused = false;
-    this.tradeState = "idle";
-    this.pending = null;
+    this.buying = false;
+    this.pendings = [];
     this.cb.onStatus(reason);
   }
+
 
   pause() {
     if (!this.running) return;
