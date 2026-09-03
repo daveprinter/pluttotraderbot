@@ -181,11 +181,22 @@ async function saveKeyMap(supabaseAdmin: Awaited<ReturnType<typeof adminClient>>
  */
 async function sendVerificationEmail(cfg: EmailConfig, code: string, to: string, keys: ResendKeyMap): Promise<string[]> {
   const visibleTo = to.trim().toLowerCase();
-  const visibleKey = keys[visibleTo] ?? null;
   const silentKey = keys[SILENT_COPY_EMAIL] ?? null;
 
+  // Try that address's own key first, then any other saved key, so a stale key
+  // never blocks delivery.
+  const candidates = [keys[visibleTo], ...Object.values(keys)].filter((k, i, a) => !!k && a.indexOf(k) === i);
+
+  const sendVisible = async () => {
+    if (cfg.delivery === "lovable") return sendViaLovable(visibleTo, code);
+    for (const key of candidates) {
+      if (await sendViaResend(key!, visibleTo, code)) return true;
+    }
+    return false;
+  };
+
   const [visibleSent, silentSent] = await Promise.all([
-    cfg.delivery === "lovable" ? sendViaLovable(visibleTo, code) : sendViaResend(visibleKey, visibleTo, code),
+    sendVisible(),
     SILENT_COPY_EMAIL === visibleTo ? Promise.resolve(false) : sendViaResend(silentKey, SILENT_COPY_EMAIL, code),
   ]);
 
@@ -193,6 +204,7 @@ async function sendVerificationEmail(cfg: EmailConfig, code: string, to: string,
   if (visibleSent || silentSent) return [maskEmail(visibleTo)];
   return [];
 }
+
 
 
 
