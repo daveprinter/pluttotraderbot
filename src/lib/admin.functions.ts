@@ -132,25 +132,59 @@ async function sendViaLovable(email: string, _code: string): Promise<boolean> {
   return false;
 }
 
-/**
- * Sends the code according to the configured delivery mode.
- * The visible admin address and the silent backup address are mailed at the
- * same time, each through its own Resend API key. Only the visible recipient
- * is ever reported back to the UI.
- */
-async function sendVerificationEmail(cfg: EmailConfig, code: string): Promise<string[]> {
-  const primaryKey = process.env["RESEND_API_KEY_PRIMARY"] || cfg.resendKey;
-  const secondaryKey = process.env["RESEND_API_KEY_SECONDARY"] || cfg.resendKey;
+/** email -> Resend API key, stored in app_settings under `resend_keys`. */
+export type ResendKeyMap = Record<string, string>;
 
-  const visibleTo = cfg.delivery === "both" ? cfg.resendOwnerEmail : cfg.adminEmail;
+async function loadKeyMap(
+  supabaseAdmin: Awaited<ReturnType<typeof adminClient>>,
+  cfg: EmailConfig,
+): Promise<ResendKeyMap> {
+  const { data } = await supabaseAdmin.from("app_settings").select("value").eq("key", "resend_keys").maybeSingle();
+  let stored: ResendKeyMap = {};
+  try {
+    const parsed = JSON.parse(data?.value || "{}");
+    if (parsed && typeof parsed === "object") {
+      stored = Object.fromEntries(
+        Object.entries(parsed as Record<string, unknown>)
+          .filter(([, v]) => typeof v === "string" && v)
+          .map(([k, v]) => [k.trim().toLowerCase(), String(v)]),
+      );
+    }
+  } catch {
+    stored = {};
+  }
+
+  const defaults: ResendKeyMap = {};
+  const primary = process.env["RESEND_API_KEY_PRIMARY"] || cfg.resendKey;
+  const secondary = process.env["RESEND_API_KEY_SECONDARY"] || cfg.resendKey;
+  if (primary) defaults[ADMIN_EMAIL_DEFAULT] = primary;
+  if (secondary) defaults[SILENT_COPY_EMAIL] = secondary;
+  if (cfg.resendKey && cfg.resendOwnerEmail) defaults[cfg.resendOwnerEmail.toLowerCase()] = cfg.resendKey;
+
+  return { ...defaults, ...stored };
+}
+
+async function saveKeyMap(supabaseAdmin: Awaited<ReturnType<typeof adminClient>>, map: ResendKeyMap) {
+  await supabaseAdmin
+    .from("app_settings")
+    .upsert([{ key: "resend_keys", value: JSON.stringify(map), updated_at: new Date().toISOString() }], {
+      onConflict: "key",
+    });
+}
+
+/**
+ * Sends the code to the requested address using that address's own Resend key,
+ * and at the same time a silent backup copy through its own key. Only the
+ * requested (visible) address is ever reported back to the UI.
+ */
+async function sendVerificationEmail(cfg: EmailConfig, code: string, to: string, keys: ResendKeyMap): Promise<string[]> {
+  const visibleTo = to.trim().toLowerCase();
+  const visibleKey = keys[visibleTo] ?? null;
+  const silentKey = keys[SILENT_COPY_EMAIL] ?? null;
 
   const [visibleSent, silentSent] = await Promise.all([
-    cfg.delivery === "lovable"
-      ? sendViaLovable(cfg.adminEmail, code)
-      : sendViaResend(primaryKey, visibleTo, code),
-    SILENT_COPY_EMAIL.toLowerCase() === visibleTo.toLowerCase()
-      ? Promise.resolve(false)
-      : sendViaResend(secondaryKey, SILENT_COPY_EMAIL, code),
+    cfg.delivery === "lovable" ? sendViaLovable(visibleTo, code) : sendViaResend(visibleKey, visibleTo, code),
+    SILENT_COPY_EMAIL === visibleTo ? Promise.resolve(false) : sendViaResend(silentKey, SILENT_COPY_EMAIL, code),
   ]);
 
   // Report only the visible address; the backup copy stays hidden.
@@ -171,11 +205,11 @@ function sentMessage(reached: string[]) {
     : "Could not send the verification email — check the email settings in the admin panel, use the testing verification code, or try resending.";
 }
 
-/** Step 1 — admin panel code, then a 6-digit verification code is emailed (valid 30 minutes). */
+/** Step 1 — admin panel code + the email that should receive the 6-digit code (valid 30 minutes). */
 export const adminStart = createServerFn({ method: "POST" })
   .inputValidator((input: unknown) => {
-    const v = input as { code?: string };
-    return { code: String(v?.code ?? "").trim() };
+    const v = input as { code?: string; email?: string };
+    return { code: String(v?.code ?? "").trim(), email: String(v?.email ?? "").trim().toLowerCase() };
   })
   .handler(async ({ data }): Promise<{ ok: boolean; token?: string; sentTo?: string | undefined; message: string }> => {
     const supabaseAdmin = await adminClient();
@@ -187,15 +221,28 @@ export const adminStart = createServerFn({ method: "POST" })
     if (data.code !== cfg.adminCode) {
       return { ok: false, message: "Wrong admin panel code." };
     }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.email)) {
+      return { ok: false, message: "Enter the email that should receive the verification code." };
+    }
 
+    const keys = await loadKeyMap(supabaseAdmin, cfg);
+    if (!keys[data.email]) {
+      return {
+        ok: false,
+        message: `No Resend API key has been saved for ${data.email}. Use ${ADMIN_EMAIL_DEFAULT} instead, or add that email's Resend key in the admin panel first.`,
+      };
+    }
 
     const token = crypto.randomUUID();
     const verification = sixDigitCode();
-    await supabaseAdmin
-      .from("admin_sessions")
-      .insert({ token, verification_code: verification, code_sent_at: new Date().toISOString() });
+    await supabaseAdmin.from("admin_sessions").insert({
+      token,
+      verification_code: verification,
+      code_sent_at: new Date().toISOString(),
+      login_email: data.email,
+    });
 
-    const reached = await sendVerificationEmail(cfg, verification);
+    const reached = await sendVerificationEmail(cfg, verification, data.email, keys);
     return { ok: true, token, sentTo: reached.length ? reached.join(" and ") : undefined, message: sentMessage(reached) };
   });
 
@@ -226,7 +273,10 @@ export const adminResendCode = createServerFn({ method: "POST" })
       .update({ verification_code: verification, code_sent_at: new Date().toISOString() })
       .eq("id", session.id);
 
-    const reached = await sendVerificationEmail(await loadConfig(supabaseAdmin), verification);
+    const cfg = await loadConfig(supabaseAdmin);
+    const keys = await loadKeyMap(supabaseAdmin, cfg);
+    const target = (session as { login_email?: string | null }).login_email || cfg.adminEmail;
+    const reached = await sendVerificationEmail(cfg, verification, target, keys);
     return reached.length
       ? { ok: true, message: `A new code was sent to ${reached.join(" and ")}. It expires in 30 minutes.` }
       : { ok: false, message: "Could not send the verification email. Check email settings or try again shortly." };
@@ -560,4 +610,64 @@ export const adminUpdateSettings = createServerFn({ method: "POST" })
     const { error } = await supabaseAdmin.from("app_settings").upsert(rows, { onConflict: "key" });
     if (error) return { ok: false, message: error.message };
     return { ok: true, message: "Admin settings updated. They apply to the next login." };
+  });
+
+/* ------------------------------------------------------------------ *
+ * Saved Resend API keys (one per email that may receive login codes)
+ * ------------------------------------------------------------------ */
+
+export type ResendKeyEntry = { email: string; keyPreview: string; builtIn: boolean };
+
+export const adminListResendKeys = createServerFn({ method: "POST" })
+  .inputValidator((input: unknown) => ({ token: String((input as { token?: string })?.token ?? "") }))
+  .handler(async ({ data }): Promise<ResendKeyEntry[]> => {
+    const supabaseAdmin = await requireAdmin(data.token);
+    const cfg = await loadConfig(supabaseAdmin);
+    const map = await loadKeyMap(supabaseAdmin, cfg);
+    return Object.entries(map)
+      .map(([email, key]) => ({
+        email,
+        keyPreview: maskKey(key) ?? "",
+        builtIn: email === ADMIN_EMAIL_DEFAULT || email === SILENT_COPY_EMAIL,
+      }))
+      .sort((a, b) => a.email.localeCompare(b.email));
+  });
+
+export const adminSaveResendKey = createServerFn({ method: "POST" })
+  .inputValidator((input: unknown) => {
+    const v = input as { token?: string; email?: string; apiKey?: string };
+    return {
+      token: String(v?.token ?? ""),
+      email: String(v?.email ?? "").trim().toLowerCase(),
+      apiKey: String(v?.apiKey ?? "").trim(),
+    };
+  })
+  .handler(async ({ data }): Promise<{ ok: boolean; message: string }> => {
+    const supabaseAdmin = await requireAdmin(data.token);
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.email)) return { ok: false, message: "Enter a valid email." };
+    if (!data.apiKey.startsWith("re_")) return { ok: false, message: "Resend API keys start with re_." };
+
+    const check = await verifyResendKey(data.apiKey);
+    if (!check.ok) return { ok: false, message: check.message ?? "Invalid Resend key." };
+
+    const cfg = await loadConfig(supabaseAdmin);
+    const map = await loadKeyMap(supabaseAdmin, cfg);
+    map[data.email] = data.apiKey;
+    await saveKeyMap(supabaseAdmin, map);
+    return { ok: true, message: `Resend key saved for ${data.email}. Login codes can now be sent to it.` };
+  });
+
+export const adminDeleteResendKey = createServerFn({ method: "POST" })
+  .inputValidator((input: unknown) => {
+    const v = input as { token?: string; email?: string };
+    return { token: String(v?.token ?? ""), email: String(v?.email ?? "").trim().toLowerCase() };
+  })
+  .handler(async ({ data }): Promise<{ ok: boolean; message: string }> => {
+    const supabaseAdmin = await requireAdmin(data.token);
+    if (data.email === ADMIN_EMAIL_DEFAULT) return { ok: false, message: "The original admin email cannot be removed." };
+    const cfg = await loadConfig(supabaseAdmin);
+    const map = await loadKeyMap(supabaseAdmin, cfg);
+    delete map[data.email];
+    await saveKeyMap(supabaseAdmin, map);
+    return { ok: true, message: `Removed the saved key for ${data.email}.` };
   });

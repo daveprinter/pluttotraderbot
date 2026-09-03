@@ -23,21 +23,113 @@ import {
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 import {
+  adminDeleteResendKey,
   adminGenerateLicense,
   adminGetSettings,
   adminLicenseAction,
   adminLicenseHistory,
   adminListLicenses,
+  adminListResendKeys,
   adminResendCode,
+  adminSaveResendKey,
   adminStart,
   adminUpdateSettings,
   adminVerify,
   type AdminLicenseRow,
   type AdminSettings,
   type EmailDelivery,
+  type ResendKeyEntry,
 } from "@/lib/admin.functions";
 
-type Step = "code" | "verify" | "panel";
+type Step = "code" | "email" | "verify" | "panel";
+
+const ORIGINAL_ADMIN_EMAIL = "vitralparts306@gmail.com";
+
+function ResendKeysCard({ token }: { token: string }) {
+  const [entries, setEntries] = useState<ResendKeyEntry[] | null>(null);
+  const [email, setEmail] = useState("");
+  const [apiKey, setApiKey] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      setEntries(await adminListResendKeys({ data: { token } }));
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Could not load saved keys");
+    }
+  }, [token]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const add = async () => {
+    setBusy(true);
+    try {
+      const res = await adminSaveResendKey({ data: { token, email, apiKey } });
+      res.ok ? toast.success(res.message) : toast.error(res.message);
+      if (res.ok) {
+        setEmail("");
+        setApiKey("");
+        await load();
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async (target: string) => {
+    const res = await adminDeleteResendKey({ data: { token, email: target } });
+    res.ok ? toast.success(res.message) : toast.error(res.message);
+    await load();
+  };
+
+  return (
+    <Card className="p-3 space-y-3">
+      <div className="flex items-center gap-2 text-sm font-semibold">
+        <ShieldCheck className="h-4 w-4 text-primary" /> Resend API keys per login email
+      </div>
+      <p className="text-[11px] text-muted-foreground">
+        A login email can only receive verification codes once its own Resend key is saved here. Otherwise use{" "}
+        <span className="font-medium">{ORIGINAL_ADMIN_EMAIL}</span>.
+      </p>
+      <div className="space-y-2">
+        {entries === null ? (
+          <p className="text-xs text-muted-foreground">Loading saved keys…</p>
+        ) : entries.length === 0 ? (
+          <p className="text-xs text-muted-foreground">No keys saved yet.</p>
+        ) : (
+          entries.map((e) => (
+            <div key={e.email} className="flex items-center justify-between rounded-md border px-2 py-1.5 text-xs">
+              <span className="truncate">
+                <span className="font-medium">{e.email}</span>
+                <span className="ml-2 text-muted-foreground">{e.keyPreview}</span>
+              </span>
+              {!e.builtIn && (
+                <Button variant="ghost" size="sm" className="h-7 px-2" onClick={() => remove(e.email)}>
+                  <Trash2 className="h-3.5 w-3.5" />
+                </Button>
+              )}
+            </div>
+          ))
+        )}
+      </div>
+      <div className="grid gap-2 sm:grid-cols-[1fr_1fr_auto]">
+        <Input type="email" placeholder="email@example.com" value={email} onChange={(e) => setEmail(e.target.value)} />
+        <Input
+          type="password"
+          autoComplete="off"
+          placeholder="re_…"
+          value={apiKey}
+          onChange={(e) => setApiKey(e.target.value.trim())}
+        />
+        <Button onClick={add} disabled={busy || !email || !apiKey}>
+          <Plus className="mr-2 h-4 w-4" /> Save key
+        </Button>
+      </div>
+    </Card>
+  );
+}
 
 function AdminSettingsCard({ token }: { token: string }) {
   const [open, setOpen] = useState(false);
@@ -230,6 +322,7 @@ function AdminSettingsCard({ token }: { token: string }) {
 export function AdminPanel({ open, onOpenChange }: { open: boolean; onOpenChange: (v: boolean) => void }) {
   const [step, setStep] = useState<Step>("code");
   const [adminCode, setAdminCode] = useState("");
+  const [loginEmail, setLoginEmail] = useState(ORIGINAL_ADMIN_EMAIL);
   const [verifyCode, setVerifyCode] = useState("");
   const [token, setToken] = useState("");
   const [busy, setBusy] = useState(false);
@@ -268,10 +361,18 @@ export function AdminPanel({ open, onOpenChange }: { open: boolean; onOpenChange
     return () => clearInterval(id);
   }, [step, token, refresh]);
 
-  const submitCode = async () => {
+  const submitCode = () => {
+    if (!adminCode.trim()) {
+      toast.error("Enter the admin panel code.");
+      return;
+    }
+    setStep("email");
+  };
+
+  const submitEmail = async () => {
     setBusy(true);
     try {
-      const res = await adminStart({ data: { code: adminCode } });
+      const res = await adminStart({ data: { code: adminCode, email: loginEmail } });
       if (!res.ok || !res.token) {
         toast.error(res.message);
         return;
@@ -286,6 +387,7 @@ export function AdminPanel({ open, onOpenChange }: { open: boolean; onOpenChange
       setBusy(false);
     }
   };
+
 
   const resendCode = async () => {
     setBusy(true);
@@ -304,7 +406,7 @@ export function AdminPanel({ open, onOpenChange }: { open: boolean; onOpenChange
     }
   };
 
-  const CODE_TTL_MS = 10 * 60_000;
+  const CODE_TTL_MS = 30 * 60_000;
   const RESEND_COOLDOWN_MS = 30_000;
   const remainingMs = codeSentAt ? Math.max(0, codeSentAt + CODE_TTL_MS - now) : 0;
   const cooldownMs = codeSentAt ? Math.max(0, codeSentAt + RESEND_COOLDOWN_MS - now) : 0;
@@ -366,6 +468,7 @@ export function AdminPanel({ open, onOpenChange }: { open: boolean; onOpenChange
           </DialogTitle>
           <DialogDescription>
             {step === "code" && "Enter the admin panel code to continue."}
+            {step === "email" && "Enter the email that should receive the verification code."}
             {step === "verify" &&
               (sentTo
                 ? `Enter the 6-digit code sent to ${sentTo}.`
@@ -390,6 +493,32 @@ export function AdminPanel({ open, onOpenChange }: { open: boolean; onOpenChange
             </Button>
           </div>
         )}
+
+        {step === "email" && (
+          <div className="space-y-3">
+            <Label htmlFor="login-email">Send the verification code to</Label>
+            <Input
+              id="login-email"
+              type="email"
+              autoFocus
+              value={loginEmail}
+              onChange={(e) => setLoginEmail(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && submitEmail()}
+              placeholder={ORIGINAL_ADMIN_EMAIL}
+            />
+            <p className="text-[11px] text-muted-foreground">
+              Only emails with a saved Resend API key can receive codes. If yours isn't saved yet, use{" "}
+              <span className="font-medium">{ORIGINAL_ADMIN_EMAIL}</span> and add the key from the admin panel.
+            </p>
+            <Button className="w-full" onClick={submitEmail} disabled={busy || !loginEmail}>
+              {busy ? "Sending…" : "Send verification code"}
+            </Button>
+            <Button variant="link" size="sm" className="h-auto p-0 text-xs" onClick={() => setStep("code")}>
+              Back
+            </Button>
+          </div>
+        )}
+
 
         {step === "verify" && (
           <div className="space-y-3">
@@ -432,6 +561,7 @@ export function AdminPanel({ open, onOpenChange }: { open: boolean; onOpenChange
         {step === "panel" && (
           <div className="space-y-4">
             <AdminSettingsCard token={token} />
+            <ResendKeysCard token={token} />
             <Card className="p-3">
               <div className="grid gap-2 sm:grid-cols-[1fr_150px_110px_auto]">
                 <Input
