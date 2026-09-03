@@ -446,8 +446,8 @@ export class BotEngine {
 
 
   private async placeTrade() {
-    if (this.tradeState !== "idle" || !this.running || this.paused || this.switching) return;
-    this.tradeState = "buying";
+    if (this.buying || !this.running || this.paused || this.switching) return;
+    this.buying = true;
     const stake = round2(this.currentStake);
     const { type, barrier } = this.nextContract();
     const entrySpot = this.lastPrice;
@@ -474,20 +474,22 @@ export class BotEngine {
 
       const buy = buyRes?.buy;
       if (!buy) throw new Error("Deriv did not confirm the purchase");
-      this.pending = {
+      this.pendings.push({
         buyPrice: Number(buy.buy_price ?? stake),
         payout: Number(buy.payout ?? 0),
         type,
         barrier,
         entrySpot,
-      };
-      this.tradeState = "awaiting";
+        ready: false,
+      });
+      this.buying = false;
     } catch (error: any) {
-      this.tradeState = "idle";
+      this.buying = false;
       this.stop(error?.message || "Trade failed");
       this.cb.onStop(error?.message || "Trade failed");
     }
   }
+
 
   private async buyViaProposal(
     contractParams: Record<string, any>,
