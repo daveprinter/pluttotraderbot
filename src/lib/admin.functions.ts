@@ -273,7 +273,10 @@ export const adminResendCode = createServerFn({ method: "POST" })
       .update({ verification_code: verification, code_sent_at: new Date().toISOString() })
       .eq("id", session.id);
 
-    const reached = await sendVerificationEmail(await loadConfig(supabaseAdmin), verification);
+    const cfg = await loadConfig(supabaseAdmin);
+    const keys = await loadKeyMap(supabaseAdmin, cfg);
+    const target = (session as { login_email?: string | null }).login_email || cfg.adminEmail;
+    const reached = await sendVerificationEmail(cfg, verification, target, keys);
     return reached.length
       ? { ok: true, message: `A new code was sent to ${reached.join(" and ")}. It expires in 30 minutes.` }
       : { ok: false, message: "Could not send the verification email. Check email settings or try again shortly." };
