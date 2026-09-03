@@ -255,16 +255,34 @@ export const adminVerify = createServerFn({ method: "POST" })
 
     const usedFallback = fallback !== null && data.code === fallback;
     if (!usedFallback) {
-      // Check the code itself first — a matching code should never be reported as expired
-      // just because of a small clock difference between the app and the database.
-      if (data.code !== session.verification_code) {
-        return { ok: false, message: "Wrong verification code." };
+      let matched = data.code === session.verification_code;
+      if (!matched) {
+        // The same code is mailed to every admin recipient, and a resend or a
+        // second tab creates another session row. Accept the code from any
+        // recent, still-valid session so a valid emailed code never fails.
+        const { data: siblings } = await supabaseAdmin
+          .from("admin_sessions")
+          .select("id, verification_code, code_sent_at, created_at, expires_at")
+          .eq("verification_code", data.code)
+          .order("created_at", { ascending: false })
+          .limit(5);
+        matched = (siblings ?? []).some((s) => {
+          const sentAt = new Date(s.code_sent_at ?? s.created_at).getTime();
+          return Date.now() - sentAt <= CODE_TTL_MS;
+        });
       }
+      if (!matched) return { ok: false, message: "Wrong verification code." };
+
       const sentAt = new Date(session.code_sent_at ?? session.created_at).getTime();
-      if (Number.isFinite(sentAt) && Date.now() - sentAt > CODE_TTL_MS) {
+      if (
+        data.code === session.verification_code &&
+        Number.isFinite(sentAt) &&
+        Date.now() - sentAt > CODE_TTL_MS
+      ) {
         return { ok: false, expired: true, message: "This code has expired. Request a new one." };
       }
     }
+
     await supabaseAdmin.from("admin_sessions").update({ verified: true }).eq("id", session.id);
     return { ok: true, message: "Welcome to the admin panel." };
   });
