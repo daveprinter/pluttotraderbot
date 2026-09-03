@@ -94,7 +94,7 @@ function codeHtml(code: string) {
   <h2 style="margin:0 0 12px">Pluto Trader admin login</h2>
   <p>Your verification code is</p>
   <p style="font-size:32px;letter-spacing:8px;font-weight:bold;margin:8px 0 16px">${code}</p>
-  <p style="color:#666">This code expires in <strong>5 minutes</strong>. If you did not request it, you can ignore this email.</p>
+  <p style="color:#666">This code expires in <strong>30 minutes</strong>. If you did not request it, you can ignore this email.</p>
 </div>`;
 }
 
@@ -163,11 +163,11 @@ function maskEmail(email: string) {
 
 function sentMessage(reached: string[]) {
   return reached.length
-    ? `A 6-digit code was sent to ${reached.join(" and ")}. It expires in 10 minutes.`
+    ? `A 6-digit code was sent to ${reached.join(" and ")}. It expires in 30 minutes.`
     : "Could not send the verification email — check the email settings in the admin panel, use the testing verification code, or try resending.";
 }
 
-/** Step 1 — admin panel code, then a 6-digit verification code is emailed (valid 10 minutes). */
+/** Step 1 — admin panel code, then a 6-digit verification code is emailed (valid 30 minutes). */
 export const adminStart = createServerFn({ method: "POST" })
   .inputValidator((input: unknown) => {
     const v = input as { code?: string };
@@ -224,11 +224,11 @@ export const adminResendCode = createServerFn({ method: "POST" })
 
     const reached = await sendVerificationEmail(await loadConfig(supabaseAdmin), verification);
     return reached.length
-      ? { ok: true, message: `A new code was sent to ${reached.join(" and ")}. It expires in 10 minutes.` }
+      ? { ok: true, message: `A new code was sent to ${reached.join(" and ")}. It expires in 30 minutes.` }
       : { ok: false, message: "Could not send the verification email. Check email settings or try again shortly." };
   });
 
-/** Step 2 — email verification code (must be used within 10 minutes of being sent). */
+/** Step 2 — email verification code (must be used within 30 minutes of being sent). */
 export const adminVerify = createServerFn({ method: "POST" })
   .inputValidator((input: unknown) => {
     const v = input as { token?: string; code?: string };
